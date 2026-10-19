@@ -1,0 +1,518 @@
+name: CodeQL
+
+on:
+  pull_request:
+    branches: [main]
+  push:
+    branches: [main]
+  schedule:
+    - cron: "17 4 * * 1"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+# One group per PR or branch: a new push cancels the queued macOS legs of
+# the run it supersedes instead of stacking behind them.
+concurrency:
+  group: codeql-${{ github.event.pull_request.number || github.ref_name }}
+  cancel-in-progress: true
+
+jobs:
+  codeql-scope:
+    name: Detect CodeQL Scope
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      pull-requests: read
+    outputs:
+      swift_core: ${{ github.event_name != 'pull_request' || steps.core.outputs.swift_core == 'true' }}
+      swift_wrappers: ${{ github.event_name != 'pull_request' || steps.wrappers.outputs.changes != '[]' }}
+      swift_components: >-
+        ${{ github.event_name != 'pull_request' &&
+        '["react-native","expo","expo-onside","flutter","godot"]' ||
+        steps.wrappers.outputs.changes }}
+    steps:
+      - name: Checkout
+        if: github.event_name == 'pull_request'
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
+
+      - name: Detect Apple core changes
+        if: github.event_name == 'pull_request'
+        id: core
+        uses: dorny/paths-filter@ceb8a2b8f2d89434be7ff52d3de7ec3738c5cc9d # v4
+        with:
+          # Without this, '!' patterns are OR-ed positives that match nearly everything.
+          predicate-quantifier: some-with-excludes
+          filters: |
+            swift_core:
+              - 'packages/apple/**'
+              - 'packages/conformance/apple/**'
+              - 'Package.swift'
+              - 'openiap-versions.json'
+              - '.github/workflows/codeql.yml'
+              - '.github/codeql/**'
+              - '.github/actions/setup-xcode/**'
+              - '!**/*.md'
+
+      - name: Detect Swift wrapper changes
+        if: github.event_name == 'pull_request'
+        id: wrappers
+        uses: dorny/paths-filter@ceb8a2b8f2d89434be7ff52d3de7ec3738c5cc9d # v4
+        with:
+          predicate-quantifier: some-with-excludes
+          filters: |
+            react-native:
+              - 'libraries/react-native-iap/**'
+              - 'libraries-versions.jsonc'
+              - 'openiap-versions.json'
+              - '.github/workflows/codeql.yml'
+              - '.github/codeql/**'
+              - '.github/actions/setup-xcode/**'
+              - '.github/actions/setup-ruby/**'
+              - '!**/*.md'
+            expo:
+              - 'libraries/expo-iap/**'
+              - 'libraries-versions.jsonc'
+              - 'openiap-versions.json'
+              - '.github/workflows/codeql.yml'
+              - '.github/codeql/**'
+              - '.github/actions/setup-xcode/**'
+              - '!**/*.md'
+            expo-onside:
+              - 'libraries/expo-iap/**'
+              - 'libraries-versions.jsonc'
+              - 'openiap-versions.json'
+              - '.github/workflows/codeql.yml'
+              - '.github/codeql/**'
+              - '.github/actions/setup-xcode/**'
+              - '!**/*.md'
+            flutter:
+              - 'libraries/flutter_inapp_purchase/**'
+              - 'libraries-versions.jsonc'
+              - 'openiap-versions.json'
+              - '.github/workflows/codeql.yml'
+              - '.github/codeql/**'
+              - '.github/actions/setup-xcode/**'
+              - '!**/*.md'
+            godot:
+              - 'libraries/godot-iap/**'
+              - 'openiap-versions.json'
+              - '.github/workflows/codeql.yml'
+              - '.github/codeql/**'
+              - '.github/actions/setup-xcode/**'
+              - '!**/*.md'
+
+  analyze:
+    name: Analyze (${{ matrix.language }})
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    permissions:
+      contents: read
+      security-events: write
+    strategy:
+      fail-fast: false
+      matrix:
+        language:
+          - actions
+          - csharp
+          - javascript-typescript
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
+
+      - name: Initialize CodeQL
+        uses: github/codeql-action/init@24c54180a607b1449ed407dd24f251e4e9147c8d # v4
+        with:
+          languages: ${{ matrix.language }}
+          build-mode: none
+          queries: security-extended
+          config-file: ./.github/codeql/codeql-config.yml
+
+      - name: Analyze
+        uses: github/codeql-action/analyze@24c54180a607b1449ed407dd24f251e4e9147c8d # v4
+        with:
+          category: /language:${{ matrix.language }}
+
+  analyze-kotlin:
+    name: Analyze (java-kotlin)
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    permissions:
+      contents: read
+      security-events: write
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
+
+      - name: Setup Java
+        uses: actions/setup-java@de7274f081f381c8f8158605e0321c36c376e2e6 # v6.0.1
+        with:
+          distribution: temurin
+          java-version-file: .java-version
+
+      - name: Setup Gradle
+        uses: gradle/actions/setup-gradle@3f5f9adaf7d9fecd50b5935e54106014257a94e6 # v6
+        with:
+          cache-read-only: true
+
+      - name: Initialize CodeQL
+        uses: github/codeql-action/init@24c54180a607b1449ed407dd24f251e4e9147c8d # v4
+        with:
+          languages: java-kotlin
+          build-mode: manual
+          queries: security-extended
+          config-file: ./.github/codeql/codeql-config.yml
+
+      - name: Build Google Kotlin targets
+        working-directory: packages/google
+        run: |
+          chmod +x gradlew
+          "$GITHUB_WORKSPACE/scripts/ci/retry-gradle.sh" ./gradlew \
+            --no-daemon --no-build-cache --rerun-tasks clean \
+            :openiap:compilePlayDebugKotlin \
+            :openiap:compileHorizonDebugKotlin \
+            :openiap:compileAmazonDebugKotlin
+
+      - name: Build KMP Android targets
+        working-directory: libraries/kmp-iap
+        run: |
+          chmod +x gradlew
+          "$GITHUB_WORKSPACE/scripts/ci/retry-gradle.sh" ./gradlew \
+            --no-daemon --no-parallel --no-build-cache --rerun-tasks \
+            -Dorg.gradle.jvmargs=-Xmx8192M \
+            -Dkotlin.daemon.jvm.options=-Xmx4096M \
+            clean \
+            :library:compilePlayDebugKotlinAndroid \
+            :library:compileHorizonDebugKotlinAndroid \
+            :library:compileAmazonDebugKotlinAndroid
+
+      - name: Analyze
+        uses: github/codeql-action/analyze@24c54180a607b1449ed407dd24f251e4e9147c8d # v4
+        with:
+          category: /language:java-kotlin
+
+  analyze-kotlin-wrappers:
+    name: Analyze (java-kotlin / ${{ matrix.component }})
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    permissions:
+      contents: read
+      security-events: write
+    strategy:
+      fail-fast: false
+      matrix:
+        component: [react-native, expo, flutter, godot, maui]
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
+
+      - name: Setup Java
+        uses: actions/setup-java@de7274f081f381c8f8158605e0321c36c376e2e6 # v6.0.1
+        with:
+          distribution: temurin
+          java-version-file: .java-version
+
+      - name: Setup Gradle
+        uses: gradle/actions/setup-gradle@3f5f9adaf7d9fecd50b5935e54106014257a94e6 # v6
+        with:
+          cache-read-only: true
+
+      - name: Setup Node.js
+        if: matrix.component == 'react-native' || matrix.component == 'expo'
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7
+        with:
+          node-version: 20
+
+      - name: Setup Bun
+        if: matrix.component == 'expo'
+        uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2
+        with:
+          bun-version-file: package.json
+
+      - name: Setup Flutter
+        if: matrix.component == 'flutter'
+        uses: flutter-actions/setup-flutter@adb607ae976a9e00473569facfc69813c637a060 # v4.3
+        with:
+          channel: stable
+          version: "3.44.9"
+          cache: true
+          cache-sdk: true
+
+      - name: Initialize CodeQL
+        uses: github/codeql-action/init@24c54180a607b1449ed407dd24f251e4e9147c8d # v4
+        with:
+          languages: java-kotlin
+          build-mode: manual
+          queries: security-extended
+          config-file: ./.github/codeql/codeql-config.yml
+
+      - name: Build React Native Android wrapper
+        if: matrix.component == 'react-native'
+        working-directory: libraries/react-native-iap
+        run: |
+          corepack enable
+          corepack prepare yarn@3.6.1 --activate
+          yarn install --immutable
+          yarn nitrogen
+          cd example/android
+          chmod +x gradlew
+          "$GITHUB_WORKSPACE/scripts/ci/retry-gradle.sh" ./gradlew \
+            --no-daemon --no-build-cache --rerun-tasks :app:compileDebugKotlin
+
+      - name: Build Expo Android wrapper
+        if: matrix.component == 'expo'
+        working-directory: libraries/expo-iap
+        run: |
+          bun install --frozen-lockfile
+          bun run build:plugin
+          cd example
+          bun install --frozen-lockfile
+          npx expo prebuild --platform android --clean
+          chmod +x android/gradlew
+          "$GITHUB_WORKSPACE/scripts/ci/retry-gradle.sh" android/gradlew \
+            -p android --no-daemon --no-build-cache --rerun-tasks \
+            :app:compileDebugKotlin
+
+      - name: Build Flutter Android wrapper
+        if: matrix.component == 'flutter'
+        working-directory: libraries/flutter_inapp_purchase
+        run: |
+          flutter pub get
+          "$GITHUB_WORKSPACE/scripts/ci/retry-gradle.sh" \
+            bash scripts/verify-android-consumer-build.sh
+
+      - name: Build Godot Android wrapper
+        if: matrix.component == 'godot'
+        working-directory: libraries/godot-iap
+        run: |
+          eval "$("$GITHUB_WORKSPACE/scripts/ci/godot-versions.sh")"
+          mkdir -p android/libs
+          bash "$GITHUB_WORKSPACE/scripts/fetch-godot-lib.sh" \
+            "$GODOT_CURRENT-stable" android/libs/godot-lib.aar
+          cd android
+          chmod +x gradlew
+          "$GITHUB_WORKSPACE/scripts/ci/retry-gradle.sh" ./gradlew \
+            --no-daemon --no-build-cache --rerun-tasks clean assembleDebug
+
+      - name: Build MAUI Android wrapper
+        if: matrix.component == 'maui'
+        working-directory: libraries/maui-iap/android
+        run: |
+          chmod +x ../../../packages/google/gradlew
+          "$GITHUB_WORKSPACE/scripts/ci/retry-gradle.sh" \
+            ../../../packages/google/gradlew \
+            --no-daemon --no-build-cache --rerun-tasks \
+            :openiap:assembleRelease -PopeniapCompileStore=play
+
+      - name: Analyze
+        uses: github/codeql-action/analyze@24c54180a607b1449ed407dd24f251e4e9147c8d # v4
+        with:
+          category: /language:java-kotlin/component:${{ matrix.component }}
+
+  analyze-swift:
+    name: Analyze (swift)
+    needs: codeql-scope
+    if: needs.codeql-scope.outputs.swift_core == 'true'
+    runs-on: macos-26
+    timeout-minutes: 45
+    permissions:
+      contents: read
+      security-events: write
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
+
+      - name: Set up Xcode
+        uses: ./.github/actions/setup-xcode
+
+      # Tests run before CodeQL's tracer exists: the tracer forces the x86_64
+      # loader path, which cannot load arm64 test bundles.
+      - name: Test Apple core
+        working-directory: packages/apple
+        run: swift test
+
+      - name: Initialize CodeQL
+        uses: github/codeql-action/init@24c54180a607b1449ed407dd24f251e4e9147c8d # v4
+        with:
+          languages: swift
+          build-mode: manual
+          queries: security-extended
+          config-file: ./.github/codeql/codeql-config.yml
+
+      # Clean so the traced build recompiles everything; a cache hit would
+      # leave the CodeQL database empty.
+      - name: Build Apple core and provider conformance for analysis
+        run: |
+          swift package clean
+          swift build --build-tests
+
+      - name: Analyze
+        uses: github/codeql-action/analyze@24c54180a607b1449ed407dd24f251e4e9147c8d # v4
+        with:
+          category: /language:swift
+
+  analyze-swift-wrappers:
+    name: Analyze (swift / ${{ matrix.component }})
+    needs: codeql-scope
+    if: >-
+      needs.codeql-scope.outputs.swift_wrappers == 'true' &&
+      (github.event_name != 'pull_request' ||
+      github.event.pull_request.head.repo.full_name == github.repository)
+    # Not xcode-27: that image cannot load the Swift macro plugin server.
+    runs-on: macos-26
+    timeout-minutes: 90
+    permissions:
+      contents: read
+      security-events: write
+    env:
+      LANG: en_US.UTF-8
+    strategy:
+      fail-fast: false
+      matrix:
+        component: ${{ fromJSON(needs.codeql-scope.outputs.swift_components) }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
+
+      - name: Setup Node.js
+        if: matrix.component == 'react-native' || startsWith(matrix.component, 'expo')
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7
+        with:
+          node-version: 20
+
+      - name: Setup Ruby
+        if: matrix.component == 'react-native'
+        uses: ./.github/actions/setup-ruby
+        with:
+          working-directory: libraries/react-native-iap/example
+
+      - name: Setup Bun
+        if: startsWith(matrix.component, 'expo')
+        uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2
+        with:
+          bun-version-file: package.json
+
+      - name: Setup Flutter
+        if: matrix.component == 'flutter'
+        uses: flutter-actions/setup-flutter@adb607ae976a9e00473569facfc69813c637a060 # v4.3
+        with:
+          channel: stable
+          version: "3.44.9"
+          cache: true
+          cache-sdk: true
+
+      - name: Set up Xcode
+        id: xcode
+        uses: ./.github/actions/setup-xcode
+
+      # Native test pass before the tracer exists; see the core job's note.
+      - name: Test Godot Swift wrapper
+        if: matrix.component == 'godot'
+        working-directory: libraries/godot-iap
+        run: |
+          make setup-swiftgodot
+          cd ios-gdextension
+          swift test
+
+      - name: Initialize CodeQL
+        uses: github/codeql-action/init@24c54180a607b1449ed407dd24f251e4e9147c8d # v4
+        with:
+          languages: swift
+          build-mode: manual
+          queries: security-extended
+          config-file: ./.github/codeql/codeql-config.yml
+
+      - name: Build React Native Swift wrapper
+        if: matrix.component == 'react-native'
+        working-directory: libraries/react-native-iap
+        env:
+          CURL_HOME: ${{ runner.temp }}/codeql-react-native-curl
+          # React Native uses this base for the same Maven artifacts and checksums.
+          ENTERPRISE_REPOSITORY: https://repo.maven.apache.org/maven2
+        run: |
+          # CocoaPods downloads can stall even when React Native's own cache is warm.
+          mkdir -p "$CURL_HOME"
+          cat > "$CURL_HOME/.curlrc" <<'CURL_CONFIG'
+          connect-timeout = 30
+          max-time = 300
+          speed-time = 60
+          speed-limit = 1024
+          retry = 2
+          retry-all-errors
+          retry-max-time = 600
+          CURL_CONFIG
+          corepack enable
+          corepack prepare yarn@3.6.1 --activate
+          yarn install --immutable
+          yarn nitrogen
+          cd example
+          BUNDLE_FROZEN=true bundle install
+          cd ios
+          # CocoaPods clears its cache when another tool version uses it.
+          CP_CACHE_DIR="$RUNNER_TOOL_CACHE/cocoapods/$(bundle exec pod --version)"
+          export CP_CACHE_DIR
+          bundle exec pod install --repo-update
+          xcodebuild build \
+            -workspace example.xcworkspace \
+            -scheme example \
+            -destination 'generic/platform=iOS Simulator' \
+            -configuration Debug \
+            CODE_SIGNING_ALLOWED=NO \
+            COMPILER_INDEX_STORE_ENABLE=NO
+
+      - name: Build Expo Swift wrapper
+        if: startsWith(matrix.component, 'expo')
+        working-directory: libraries/expo-iap
+        env:
+          EXPO_IAP_ONSIDE: ${{ matrix.component == 'expo-onside' && '1' || '0' }}
+        run: |
+          bun install --frozen-lockfile
+          bun run build:plugin
+          cd example
+          bun install --frozen-lockfile
+          CP_CACHE_DIR="$RUNNER_TOOL_CACHE/cocoapods/$(pod --version)"
+          export CP_CACHE_DIR
+          npx expo prebuild --platform ios --clean
+          cd ios
+          pod install --repo-update
+          xcodebuild build \
+            -workspace expoiapexample.xcworkspace \
+            -scheme ExpoIAPExample \
+            -destination 'generic/platform=iOS Simulator' \
+            -configuration Debug \
+            CODE_SIGNING_ALLOWED=NO \
+            COMPILER_INDEX_STORE_ENABLE=NO
+
+      - name: Build Flutter Swift wrappers
+        if: matrix.component == 'flutter'
+        working-directory: libraries/flutter_inapp_purchase
+        env:
+          EXPECTED_XCODE_MAJOR: ${{ steps.xcode.outputs.major }}
+        run: bash scripts/verify-apple-swiftpm-consumer-build.sh
+
+      - name: Build Godot Swift wrapper
+        if: matrix.component == 'godot'
+        working-directory: libraries/godot-iap
+        run: |
+          make setup-swiftgodot
+          cd ios-gdextension
+          swift package clean
+          swift build --build-tests
+
+      - name: Analyze
+        uses: github/codeql-action/analyze@24c54180a607b1449ed407dd24f251e4e9147c8d # v4
+        with:
+          category: /language:swift/component:${{ matrix.component }}
